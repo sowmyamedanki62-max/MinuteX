@@ -17,7 +17,14 @@ function Login({ onLogin, onShowSignup }) {
     try {
       setLoading(true)
 
-      const response = await fetch('http://127.0.0.1:5000/login', {
+      const apiUrl = import.meta.env.VITE_API_URL
+
+      if (!apiUrl) {
+        alert('Backend URL is not configured. Please try again later.')
+        return
+      }
+
+      const response = await fetch(`${apiUrl}/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -46,7 +53,9 @@ function Login({ onLogin, onShowSignup }) {
       }
     } catch (error) {
       console.error('Login error:', error)
-      alert('Cannot connect to MinuteX backend. Please check that Flask is running.')
+      alert(
+        'Cannot connect to MinuteX backend. Please check your internet connection and try again.',
+      )
     } finally {
       setLoading(false)
     }
@@ -119,7 +128,9 @@ function Login({ onLogin, onShowSignup }) {
           </button>
         </p>
 
-        <p className="auth-note">Your delivery workspace, all in one place.</p>
+        <p className="auth-note">
+          Your delivery workspace, all in one place.
+        </p>
       </section>
 
       <a className="auth-back-link" href="#home">

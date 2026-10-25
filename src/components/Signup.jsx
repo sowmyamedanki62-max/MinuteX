@@ -1,4 +1,3 @@
-
 import { useState } from 'react'
 
 function Signup({ onSignup, onShowLogin }) {
@@ -25,14 +24,23 @@ function Signup({ onSignup, onShowLogin }) {
     setLoading(true)
 
     try {
-      const response = await fetch('http://127.0.0.1:5000/signup', {
+      const apiUrl = import.meta.env.VITE_API_URL
+
+      if (!apiUrl) {
+        alert('Backend URL is not configured. Please try again later.')
+        return
+      }
+
+      const response = await fetch(`${apiUrl}/signup`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
           fullName: fullName.trim(),
           email: email.trim(),
-          password
-        })
+          password,
+        }),
       })
 
       const data = await response.json()
@@ -52,7 +60,10 @@ function Signup({ onSignup, onShowLogin }) {
         onShowLogin()
       }
     } catch (error) {
-      alert('Cannot connect to MinuteX backend. Make sure Flask is running.')
+      console.error('Signup error:', error)
+      alert(
+        'Cannot connect to MinuteX backend. Please check your internet connection and try again.',
+      )
     } finally {
       setLoading(false)
     }

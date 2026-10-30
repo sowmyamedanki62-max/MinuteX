@@ -1,4 +1,5 @@
 import os
+import logging
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -6,12 +7,30 @@ from dotenv import load_dotenv
 import psycopg2
 import bcrypt
 
-# Load variables from .env
+
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
+
 load_dotenv()
 
-# Create Flask application
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
-CORS(app)
+
+CORS(
+    app,
+    resources={
+        r"/*": {
+            "origins": [
+                "https://minute-x.vercel.app",
+                "http://localhost:5173",
+                "http://localhost:5174"
+            ]
+        }
+    }
+)
 
 
 # --------------------------------------------------
@@ -22,9 +41,34 @@ def get_db_connection():
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
-        raise Exception("DATABASE_URL is missing from .env")
+        raise Exception("DATABASE_URL environment variable is missing.")
 
-    return psycopg2.connect(database_url)
+    database_url = database_url.strip()
+
+    # Handle accidentally copied environment variable syntax
+    if database_url.startswith("DATABASE_URL="):
+        database_url = database_url.split("=", 1)[1].strip()
+
+    # Remove accidental surrounding quotes
+    if (
+        len(database_url) >= 2
+        and database_url[0] in ("'", '"')
+        and database_url[-1] == database_url[0]
+    ):
+        database_url = database_url[1:-1]
+
+    if not database_url.startswith(
+        ("postgresql://", "postgres://")
+    ):
+        raise Exception(
+            "Invalid DATABASE_URL format. "
+            "Expected a PostgreSQL connection string."
+        )
+
+    return psycopg2.connect(
+        database_url,
+        connect_timeout=15
+    )
 
 
 # --------------------------------------------------
@@ -32,23 +76,48 @@ def get_db_connection():
 # --------------------------------------------------
 
 def create_users_table():
-    connection = get_db_connection()
-    cursor = connection.cursor()
+    connection = None
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            full_name VARCHAR(150) NOT NULL,
-            email VARCHAR(255) UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
+    try:
+        connection = get_db_connection()
 
-    connection.commit()
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id SERIAL PRIMARY KEY,
+                    full_name VARCHAR(150) NOT NULL,
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at TIMESTAMP WITH TIME ZONE
+                    DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-    cursor.close()
-    connection.close()
+        connection.commit()
+        logger.info("Users table is ready.")
+
+    except Exception:
+        if connection:
+            connection.rollback()
+
+        logger.exception("Failed to initialize users table.")
+        raise
+
+    finally:
+        if connection:
+            connection.close()
+
+
+# --------------------------------------------------
+# Initialize database for Render / Gunicorn
+# --------------------------------------------------
+
+try:
+    create_users_table()
+except Exception:
+    logger.exception(
+        "Database initialization failed during application startup."
+    )
 
 
 # --------------------------------------------------
@@ -58,6 +127,7 @@ def create_users_table():
 @app.route("/")
 def home():
     return jsonify({
+        "success": True,
         "message": "MinuteX backend is running!"
     })
 
@@ -68,15 +138,14 @@ def home():
 
 @app.route("/db-test")
 def db_test():
+    connection = None
+
     try:
         connection = get_db_connection()
-        cursor = connection.cursor()
 
-        cursor.execute("SELECT NOW();")
-        current_time = cursor.fetchone()[0]
-
-        cursor.close()
-        connection.close()
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT NOW();")
+            current_time = cursor.fetchone()[0]
 
         return jsonify({
             "success": True,
@@ -84,12 +153,17 @@ def db_test():
             "database_time": str(current_time)
         })
 
-    except Exception as e:
+    except Exception:
+        logger.exception("Database test failed.")
+
         return jsonify({
             "success": False,
-            "message": "Database connection failed",
-            "error": str(e)
+            "message": "Database connection failed. Check server logs."
         }), 500
+
+    finally:
+        if connection:
+            connection.close()
 
 
 # --------------------------------------------------
@@ -98,75 +172,72 @@ def db_test():
 
 @app.route("/signup", methods=["POST"])
 def signup():
+    connection = None
+
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
 
         if not data:
             return jsonify({
                 "success": False,
-                "message": "No data received."
+                "message": "No valid data received."
             }), 400
 
-        full_name = data.get("fullName", "").strip()
-        email = data.get("email", "").strip().lower()
+        full_name = data.get("fullName", "")
+        email = data.get("email", "")
         password = data.get("password", "")
 
-        # Validate required fields
+        if not all(isinstance(value, str) for value in
+                   [full_name, email, password]):
+            return jsonify({
+                "success": False,
+                "message": "Invalid input format."
+            }), 400
+
+        full_name = full_name.strip()
+        email = email.strip().lower()
+
         if not full_name or not email or not password:
             return jsonify({
                 "success": False,
                 "message": "Full name, email, and password are required."
             }), 400
 
-        # Password validation
         if len(password) < 8:
             return jsonify({
                 "success": False,
                 "message": "Password must contain at least 8 characters."
             }), 400
 
-        connection = get_db_connection()
-        cursor = connection.cursor()
-
-        # Check whether email already exists
-        cursor.execute(
-            "SELECT id FROM users WHERE email = %s;",
-            (email,)
-        )
-
-        existing_user = cursor.fetchone()
-
-        if existing_user:
-            cursor.close()
-            connection.close()
-
+        # bcrypt has a 72-byte password limit
+        if len(password.encode("utf-8")) > 72:
             return jsonify({
                 "success": False,
-                "message": "An account with this email already exists."
-            }), 409
+                "message": "Password must not exceed 72 bytes."
+            }), 400
 
-        # Hash password
         password_hash = bcrypt.hashpw(
             password.encode("utf-8"),
             bcrypt.gensalt()
         ).decode("utf-8")
 
-        # Save user
-        cursor.execute(
-            """
-            INSERT INTO users (full_name, email, password_hash)
-            VALUES (%s, %s, %s)
-            RETURNING id, full_name, email;
-            """,
-            (full_name, email, password_hash)
-        )
+        connection = get_db_connection()
 
-        user = cursor.fetchone()
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO users (full_name, email, password_hash)
+                VALUES (%s, %s, %s)
+                RETURNING id, full_name, email;
+                """,
+                (full_name, email, password_hash)
+            )
+
+            user = cursor.fetchone()
 
         connection.commit()
 
-        cursor.close()
-        connection.close()
+        logger.info("New user registered successfully.")
 
         return jsonify({
             "success": True,
@@ -178,12 +249,29 @@ def signup():
             }
         }), 201
 
-    except Exception as e:
+    except psycopg2.errors.UniqueViolation:
+        if connection:
+            connection.rollback()
+
         return jsonify({
             "success": False,
-            "message": "Unable to create account.",
-            "error": str(e)
+            "message": "An account with this email already exists."
+        }), 409
+
+    except Exception:
+        if connection:
+            connection.rollback()
+
+        logger.exception("Signup failed.")
+
+        return jsonify({
+            "success": False,
+            "message": "Unable to create account. Please try again."
         }), 500
+
+    finally:
+        if connection:
+            connection.close()
 
 
 # --------------------------------------------------
@@ -192,17 +280,27 @@ def signup():
 
 @app.route("/login", methods=["POST"])
 def login():
+    connection = None
+
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True)
 
         if not data:
             return jsonify({
                 "success": False,
-                "message": "No data received."
+                "message": "No valid data received."
             }), 400
 
-        email = data.get("email", "").strip().lower()
+        email = data.get("email", "")
         password = data.get("password", "")
+
+        if not isinstance(email, str) or not isinstance(password, str):
+            return jsonify({
+                "success": False,
+                "message": "Invalid input format."
+            }), 400
+
+        email = email.strip().lower()
 
         if not email or not password:
             return jsonify({
@@ -211,21 +309,18 @@ def login():
             }), 400
 
         connection = get_db_connection()
-        cursor = connection.cursor()
 
-        cursor.execute(
-            """
-            SELECT id, full_name, email, password_hash
-            FROM users
-            WHERE email = %s;
-            """,
-            (email,)
-        )
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, full_name, email, password_hash
+                FROM users
+                WHERE email = %s;
+                """,
+                (email,)
+            )
 
-        user = cursor.fetchone()
-
-        cursor.close()
-        connection.close()
+            user = cursor.fetchone()
 
         if not user:
             return jsonify({
@@ -235,7 +330,6 @@ def login():
 
         user_id, full_name, user_email, password_hash = user
 
-        # Compare entered password with stored hash
         password_is_correct = bcrypt.checkpw(
             password.encode("utf-8"),
             password_hash.encode("utf-8")
@@ -247,6 +341,8 @@ def login():
                 "message": "Invalid email or password."
             }), 401
 
+        logger.info("User login successful.")
+
         return jsonify({
             "success": True,
             "message": "Login successful!",
@@ -257,18 +353,26 @@ def login():
             }
         }), 200
 
-    except Exception as e:
+    except Exception:
+        logger.exception("Login failed.")
+
         return jsonify({
             "success": False,
-            "message": "Unable to log in.",
-            "error": str(e)
+            "message": "Unable to log in. Please try again."
         }), 500
+
+    finally:
+        if connection:
+            connection.close()
 
 
 # --------------------------------------------------
-# Start Flask
+# Start Flask locally
 # --------------------------------------------------
 
 if __name__ == "__main__":
-    create_users_table()
-    app.run(debug=True, port=5000)
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=True
+    )

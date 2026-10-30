@@ -146,8 +146,8 @@ function App() {
         <nav>
           <a href="#home">Home</a>
           <a href="#features">Features</a>
-          <a href="#dashboard">Dashboard</a>
-          <a href="#planner">Planner</a>
+          <a href="#dashboard" onClick={(event) => { if (!loggedInUser) { event.preventDefault(); setCurrentPage('login') } }}>Dashboard</a>
+          <a href="#planner" onClick={(event) => { if (!loggedInUser) { event.preventDefault(); setCurrentPage('login') } }}>Planner</a>
         </nav>
         <div className="nav-actions">
           {loggedInUser ? (
@@ -208,7 +208,7 @@ function App() {
           <button
             type="button"
             className="nav-button"
-            onClick={() => scrollTo('planner')}
+            onClick={() => loggedInUser ? scrollTo('planner') : setCurrentPage('login')}
           >
             Plan a Route →
           </button>
@@ -232,7 +232,7 @@ function App() {
             <button
               type="button"
               className="primary-button"
-              onClick={() => scrollTo('planner')}
+              onClick={() => loggedInUser ? scrollTo('planner') : setCurrentPage('login')}
             >
               Explore the Planner <span>→</span>
             </button>
@@ -315,6 +315,7 @@ function App() {
           </div>
         </section>
         {/* Interactive dashboard */}
+        {loggedInUser && (
         <section className="dashboard-section" id="dashboard">
           <div className="dashboard-heading">
             <div>
@@ -589,7 +590,9 @@ function App() {
               : 'Route statistics reflect the current route in this browser. Sign in to see your account in the workspace.'}
           </p>
         </section>
+        )}
         {/* Delivery planner */}
+        {loggedInUser && (
         <section className="planner" id="planner">
           <span className="tag">YOUR DELIVERY WORKSPACE</span>
           <h2>Plan your deliveries.</h2>
@@ -734,6 +737,7 @@ function App() {
             />
           </div>
         </section>
+        )}
       </main>
       <footer id="about">
         <a className="logo" href="#home">
